@@ -116,7 +116,6 @@ class VideoTokenizerTrainer:
         dataset_kwargs.update(channels = model.channels)
 
         # dataset and dataloader
-
         self.dataset = VSRDataset('train', num_frames, logscale)
         self.dataloader = DataLoader(self.dataset, shuffle = True, drop_last = True, batch_size = batch_size)
 
@@ -328,6 +327,8 @@ class VideoTokenizerTrainer:
             data, *_ = next(dl_iter)
 
             data = data.float()
+            data = rearrange(data, 't c h w -> c t h w')
+            data = rearrange(data, 'c t h w -> 1 c t h w')
 
             with self.accelerator.autocast(), context():
                 loss, loss_breakdown = self.model(
@@ -390,6 +391,8 @@ class VideoTokenizerTrainer:
             data, *_ = next(dl_iter)
 
             data = data.float()
+            data = rearrange(data, 't c h w -> c t h w')
+            data = rearrange(data, 'c t h w -> 1 c t h w')
 
             with self.accelerator.autocast(), context():
                 discr_loss, discr_loss_breakdown = self.model(
@@ -448,6 +451,8 @@ class VideoTokenizerTrainer:
             valid_video = valid_video.to(self.device)
 
             valid_video = valid_video.float()
+            valid_video = rearrange(valid_video, 't c h w -> c t h w')
+            valid_video = rearrange(valid_video, 'c t h w -> 1 c t h w')
 
             with self.accelerator.autocast():
                 loss, _ = self.unwrapped_model(valid_video, return_recon_loss_only = True)
