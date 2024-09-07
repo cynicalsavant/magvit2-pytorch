@@ -77,11 +77,11 @@ class VideoTokenizerTrainer:
         random_split_seed = 42,
         valid_frac = 0.05,
         validate_every_step = 100,
-        checkpoint_every_step = 100,
+        checkpoint_every_step = 2000,
         num_frames = 1,
         logscale = True,
         use_wandb_tracking = False,
-        discr_start_after_step = 0.,
+        discr_start_after_step = 1000,
         warmup_steps = 1000,
         scheduler: Optional[Type[LRScheduler]] = None,
         scheduler_kwargs: dict = dict(),
@@ -329,6 +329,7 @@ class VideoTokenizerTrainer:
             data = data.float()
             data = rearrange(data, 't c h w -> c t h w')
             data = rearrange(data, 'c t h w -> 1 c t h w')
+            data = data * 2. - 1.
 
             with self.accelerator.autocast(), context():
                 loss, loss_breakdown = self.model(
@@ -393,6 +394,7 @@ class VideoTokenizerTrainer:
             data = data.float()
             data = rearrange(data, 't c h w -> c t h w')
             data = rearrange(data, 'c t h w -> 1 c t h w')
+            data = data * 2. - 1.
 
             with self.accelerator.autocast(), context():
                 discr_loss, discr_loss_breakdown = self.model(
@@ -453,6 +455,7 @@ class VideoTokenizerTrainer:
             valid_video = valid_video.float()
             valid_video = rearrange(valid_video, 't c h w -> c t h w')
             valid_video = rearrange(valid_video, 'c t h w -> 1 c t h w')
+            valid_video = valid_video * 2. - 1.
 
             with self.accelerator.autocast():
                 loss, _ = self.unwrapped_model(valid_video, return_recon_loss_only = True)
@@ -480,6 +483,9 @@ class VideoTokenizerTrainer:
 
         valid_videos = torch.cat(valid_videos)
         recon_videos = torch.cat(recon_videos)
+
+        valid_video = valid_videos * 0.5 + 0.5
+        recon_videos = recon_videos * 0.5 + 0.5
 
         recon_videos.clamp_(min = 0., max = 1.)
 

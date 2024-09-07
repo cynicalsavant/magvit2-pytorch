@@ -1686,7 +1686,6 @@ class VideoTokenizer(Module):
         else:
             video = video_or_images
 
-        print(video.shape)
         batch, channels, frames = video.shape[:3]
 
         assert divisible_by(frames - int(video_contains_first_frame), self.time_downsample_factor), f'number of frames {frames} minus the first frame ({frames - int(video_contains_first_frame)}) must be divisible by the total downsample factor across time {self.time_downsample_factor}'
