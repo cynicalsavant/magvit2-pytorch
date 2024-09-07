@@ -12,16 +12,16 @@ import pytorch_warmup as warmup
 from beartype import beartype
 from beartype.typing import Optional, Literal, Union, Type
 
-from magvit2_pytorch.optimizer import get_optimizer
+from optimizer import get_optimizer
 
-from magvit2_pytorch.magvit2_pytorch import VideoTokenizer
+from magvit2_pytorch import VideoTokenizer
 
-from magvit2_pytorch.data import (
-    VideoDataset,
-    ImageDataset,
-    DataLoader,
+from data import (
+    VSRDataset,
     video_tensor_to_gif
 )
+
+from torch.utils.data import DataLoader
 
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
@@ -78,7 +78,8 @@ class VideoTokenizerTrainer:
         valid_frac = 0.05,
         validate_every_step = 100,
         checkpoint_every_step = 100,
-        num_frames = 17,
+        num_frames = 1,
+        logscale = True,
         use_wandb_tracking = False,
         discr_start_after_step = 0.,
         warmup_steps = 1000,
@@ -114,39 +115,13 @@ class VideoTokenizerTrainer:
 
         dataset_kwargs.update(channels = model.channels)
 
-        # dataset
-
-        if not exists(dataset):
-            if dataset_type == 'videos':
-                dataset_klass = VideoDataset
-                dataset_kwargs = {**dataset_kwargs, 'num_frames': num_frames}
-            else:
-                dataset_klass = ImageDataset
-
-            assert exists(dataset_folder)
-            dataset = dataset_klass(dataset_folder, image_size = model.image_size, **dataset_kwargs)
-
-        # splitting dataset for validation
-
-        assert 0 <= valid_frac < 1.
-
-        if valid_frac > 0:
-            train_size = int((1 - valid_frac) * len(dataset))
-            valid_size = len(dataset) - train_size
-            dataset, valid_dataset = random_split(dataset, [train_size, valid_size], generator = torch.Generator().manual_seed(random_split_seed))
-
-            self.print(f'training with dataset of {len(dataset)} samples and validating with randomly splitted {len(valid_dataset)} samples')
-        else:
-            valid_dataset = dataset
-            self.print(f'training with shared training and valid dataset of {len(dataset)} samples')
-
         # dataset and dataloader
 
-        self.dataset = dataset
-        self.dataloader = DataLoader(dataset, shuffle = True, drop_last = True, batch_size = batch_size)
+        self.dataset = VSRDataset('train', num_frames, logscale)
+        self.dataloader = DataLoader(self.dataset, shuffle = True, drop_last = True, batch_size = batch_size)
 
-        self.valid_dataset = valid_dataset
-        self.valid_dataloader = DataLoader(valid_dataset, shuffle = True, drop_last = True, batch_size = batch_size)
+        self.valid_dataset = VSRDataset('val', num_frames, logscale)
+        self.valid_dataloader = DataLoader(self.valid_dataset, shuffle = True, drop_last = True, batch_size = batch_size)
 
         self.validate_every_step = validate_every_step
         self.checkpoint_every_step = checkpoint_every_step
@@ -352,6 +327,8 @@ class VideoTokenizerTrainer:
 
             data, *_ = next(dl_iter)
 
+            data = data.float()
+
             with self.accelerator.autocast(), context():
                 loss, loss_breakdown = self.model(
                     data,
@@ -412,6 +389,8 @@ class VideoTokenizerTrainer:
 
             data, *_ = next(dl_iter)
 
+            data = data.float()
+
             with self.accelerator.autocast(), context():
                 discr_loss, discr_loss_breakdown = self.model(
                     data,
@@ -465,8 +444,10 @@ class VideoTokenizerTrainer:
         recon_videos = []
 
         for _ in range(self.grad_accum_every):
-            valid_video, = next(dl_iter)
+            valid_video, *_ = next(dl_iter)
             valid_video = valid_video.to(self.device)
+
+            valid_video = valid_video.float()
 
             with self.accelerator.autocast():
                 loss, _ = self.unwrapped_model(valid_video, return_recon_loss_only = True)

@@ -18,6 +18,9 @@ import numpy as np
 
 from einops import rearrange
 
+import xarray as xr
+import pickle
+
 # helper functions
 
 def exists(val):
@@ -71,45 +74,84 @@ CHANNEL_TO_MODE = {
 
 # image related helpers fnuctions and dataset
 
-class ImageDataset(Dataset):
-    def __init__(
-        self,
-        folder,
-        image_size,
-        channels = 3,
-        convert_image_to = None,
-        exts = ['jpg', 'jpeg', 'png']
-    ):
-        super().__init__()
-        folder = Path(folder)
-        assert folder.is_dir(), f'{str(folder)} must be a folder containing images'
-        self.folder = folder
+class VSRDataset(Dataset):
+    
+    def __init__(self, mode, length, logscale = False):
+        '''
+        Args:
+            channels (list): list of channels to use
+            mode (str): train or val
+            length (int): length of sequence
+            logscale (bool): whether to logscale the data
+            multi (bool): whether to use multi-channel data
+        '''
 
-        self.image_size = image_size
+        ENSEMBLE = 11
 
-        exts = exts + [ext.upper() for ext in exts]
-        self.paths = [p for ext in exts for p in folder.glob(f'**/*.{ext}')]
+        # load data
+        self.y = {}
 
-        print(f'{len(self.paths)} training samples found at {folder}')
+        PATH = "/extra/ucibdl0/shared/data/fv3gfs"
 
-        if exists(channels) and not exists(convert_image_to):
-            convert_image_to = CHANNEL_TO_MODE.get(channels)
+        for member in range(1, ENSEMBLE + 1):
 
-        self.transform = T.Compose([
-            T.Lambda(partial(convert_image_to_fn, convert_image_to)),
-            T.Resize(image_size, antialias = True),
-            T.RandomHorizontalFlip(),
-            T.CenterCrop(image_size),
-            T.ToTensor()
-        ])
+            self.y[member] = xr.open_zarr(f"{PATH}/c384_precip_ave/{member:04d}/sfc_8xdaily_ave.zarr")
+        
+        # expected sequence length
+        self.length = length
+
+        self.mode = mode
+        self.logscale = logscale
+
+        self.time_steps = self.y[1].time.shape[0]
+        self.tiles = self.y[1].tile.shape[0]
+
+        # load statistics
+        with open("/home/prakhs2/fv3net/projects/super_res/data/ensemble_c384_trainstats/chl.pkl", 'rb') as f:
+
+            self.c384_chl = pickle.load(f)
+
+        with open("/home/prakhs2/fv3net/projects/super_res/data/ensemble_c384_trainstats/log_chl.pkl", 'rb') as f:
+
+            self.c384_log_chl = pickle.load(f)
+
+        self.c384_channels = ["PRATEsfc"]
+
+        self.indices = list(range(self.time_steps - self.length + 1))
 
     def __len__(self):
-        return len(self.paths)
+        
+        return len(self.indices)
+    
+    def __getitem__(self, idx):
+        
+        time_idx = self.indices[idx]
 
-    def __getitem__(self, index):
-        path = self.paths[index]
-        img = Image.open(path)
-        return self.transform(img)
+        if self.mode == 'train':
+            
+            np.random.seed()
+            tile = np.random.randint(self.tiles)
+            member = np.random.randint(10) + 1
+        
+        else:
+            
+            tile = idx % self.tiles
+            member = 11
+
+        y = self.y[member].isel(time = slice(time_idx, time_idx + self.length), tile = tile)
+
+        y = np.stack([y[channel].values for channel in self.c384_channels], axis = 1)
+        
+        if self.logscale:
+
+            y = np.log(y - self.c384_chl["PRATEsfc"]['min'] + 1e-14)
+            y = (y - self.c384_log_chl["PRATEsfc"]['min']) / (self.c384_log_chl["PRATEsfc"]['max'] - self.c384_log_chl["PRATEsfc"]['min'])
+
+        else:
+
+            y = (y - self.c384_chl["PRATEsfc"]['min']) / (self.c384_chl["PRATEsfc"]['max'] - self.c384_chl["PRATEsfc"]['min'])
+
+        return y
 
 # tensor of shape (channels, frames, height, width) -> gif
 
@@ -229,60 +271,6 @@ def crop_center(
     starty = y // 2 - cropy // 2
     return img[starty:(starty + cropy), startx:(startx + cropx), :]
 
-# video dataset
-
-class VideoDataset(Dataset):
-    def __init__(
-        self,
-        folder,
-        image_size,
-        channels = 3,
-        num_frames = 17,
-        force_num_frames = True,
-        exts = ['gif', 'mp4']
-    ):
-        super().__init__()
-        folder = Path(folder)
-        assert folder.is_dir(), f'{str(folder)} must be a folder containing videos'
-        self.folder = folder
-
-        self.image_size = image_size
-        self.channels = channels
-        self.paths = [p for ext in exts for p in folder.glob(f'**/*.{ext}')]
-
-        print(f'{len(self.paths)} training samples found at {folder}')
-
-        self.transform = T.Compose([
-            T.Resize(image_size, antialias = True),
-            T.CenterCrop(image_size)
-        ])
-
-        # functions to transform video path to tensor
-
-        self.gif_to_tensor = partial(gif_to_tensor, channels = self.channels, transform = self.transform)
-        self.mp4_to_tensor = partial(video_to_tensor, crop_size = self.image_size)
-
-        self.cast_num_frames_fn = partial(cast_num_frames, frames = num_frames) if force_num_frames else identity
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, index):
-        path = self.paths[index]
-        ext = path.suffix
-        path_str = str(path)
-
-        if ext == '.gif':
-            tensor = self.gif_to_tensor(path_str)
-        elif ext == '.mp4':
-            tensor = self.mp4_to_tensor(path_str)
-            frames = tensor.unbind(dim = 1)
-            tensor = torch.stack([*map(self.transform, frames)], dim = 1)
-        else:
-            raise ValueError(f'unknown extension {ext}')
-
-        return self.cast_num_frames_fn(tensor)
-
 # override dataloader to be able to collate strings
 
 def collate_tensors_and_strings(data):
@@ -303,6 +291,3 @@ def collate_tensors_and_strings(data):
         output.append(datum)
 
     return tuple(output)
-
-def DataLoader(*args, **kwargs):
-    return PytorchDataLoader(*args, collate_fn = collate_tensors_and_strings, **kwargs)

@@ -26,8 +26,8 @@ from einops.layers.torch import Rearrange
 from beartype import beartype
 from beartype.typing import Tuple, List
 
-from magvit2_pytorch.attend import Attend
-from magvit2_pytorch.version import __version__
+from attend import Attend
+from version import __version__
 
 from gateloop_transformer import SimpleGateLoopLayer
 
