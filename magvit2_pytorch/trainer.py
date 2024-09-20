@@ -5,7 +5,7 @@ from contextlib import contextmanager, nullcontext
 import torch
 from torch import nn
 from torch.nn import Module
-from torch.utils.data import Dataset, random_split
+from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 import pytorch_warmup as warmup
 
@@ -20,8 +20,6 @@ from data import (
     VSRDataset,
     video_tensor_to_gif
 )
-
-from torch.utils.data import DataLoader
 
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
@@ -81,7 +79,7 @@ class VideoTokenizerTrainer:
         num_frames = 1,
         logscale = True,
         use_wandb_tracking = False,
-        discr_start_after_step = 1000,
+        discr_start_after_step = 0.,
         warmup_steps = 1000,
         scheduler: Optional[Type[LRScheduler]] = None,
         scheduler_kwargs: dict = dict(),
@@ -158,21 +156,12 @@ class VideoTokenizerTrainer:
 
         # prepare for maybe distributed
 
-        (
-            self.model,
-            self.dataloader,
-            self.optimizer,
-            self.discr_optimizer,
-            self.scheduler,
-            self.discr_scheduler,
-        ) = self.accelerator.prepare(
-            self.model,
-            self.dataloader,
-            self.optimizer,
-            self.discr_optimizer,
-            self.scheduler,
-            self.discr_scheduler,
-        )
+        self.dataloader = self.accelerator.prepare(self.dataloader)
+        self.optimizer = self.accelerator.prepare(self.optimizer)
+        self.discr_optimizer = self.accelerator.prepare(self.discr_optimizer)
+        self.scheduler = self.accelerator.prepare(self.scheduler)
+        self.discr_scheduler = self.accelerator.prepare(self.discr_scheduler)
+        self.model = self.accelerator.prepare(self.model)
 
         # only use adversarial training after a certain number of steps
 
@@ -324,12 +313,11 @@ class VideoTokenizerTrainer:
             is_last = grad_accum_step == (self.grad_accum_every - 1)
             context = partial(self.accelerator.no_sync, self.model) if not is_last else nullcontext
 
-            data, *_ = next(dl_iter)
+            data = next(dl_iter)
 
             data = data.float()
-            data = rearrange(data, 't c h w -> c t h w')
-            data = rearrange(data, 'c t h w -> 1 c t h w')
-            data = data * 2. - 1.
+            data = rearrange(data, 'b t c h w -> b c t h w')
+            # data = rearrange(data, 'c t h w -> 1 c t h w')
 
             with self.accelerator.autocast(), context():
                 loss, loss_breakdown = self.model(
@@ -389,12 +377,11 @@ class VideoTokenizerTrainer:
             is_last = grad_accum_step == (self.grad_accum_every - 1)
             context = partial(self.accelerator.no_sync, self.model) if not is_last else nullcontext
 
-            data, *_ = next(dl_iter)
+            data = next(dl_iter)
 
             data = data.float()
-            data = rearrange(data, 't c h w -> c t h w')
-            data = rearrange(data, 'c t h w -> 1 c t h w')
-            data = data * 2. - 1.
+            data = rearrange(data, 'b t c h w -> b c t h w')
+            # data = rearrange(data, 'c t h w -> 1 c t h w')
 
             with self.accelerator.autocast(), context():
                 discr_loss, discr_loss_breakdown = self.model(
@@ -449,13 +436,12 @@ class VideoTokenizerTrainer:
         recon_videos = []
 
         for _ in range(self.grad_accum_every):
-            valid_video, *_ = next(dl_iter)
+            valid_video = next(dl_iter)
             valid_video = valid_video.to(self.device)
 
             valid_video = valid_video.float()
-            valid_video = rearrange(valid_video, 't c h w -> c t h w')
-            valid_video = rearrange(valid_video, 'c t h w -> 1 c t h w')
-            valid_video = valid_video * 2. - 1.
+            valid_video = rearrange(valid_video, 'b t c h w -> b c t h w')
+            # valid_video = rearrange(valid_video, 'c t h w -> 1 c t h w')
 
             with self.accelerator.autocast():
                 loss, _ = self.unwrapped_model(valid_video, return_recon_loss_only = True)
@@ -483,9 +469,6 @@ class VideoTokenizerTrainer:
 
         valid_videos = torch.cat(valid_videos)
         recon_videos = torch.cat(recon_videos)
-
-        valid_video = valid_videos * 0.5 + 0.5
-        recon_videos = recon_videos * 0.5 + 0.5
 
         recon_videos.clamp_(min = 0., max = 1.)
 
